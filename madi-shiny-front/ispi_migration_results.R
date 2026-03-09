@@ -95,7 +95,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
   
   query <- paste0("
     SELECT 
-      xmap_sample_id, sampleid, antigen, feature, 
+      xmap_sample_id, sampleid, patientid, antigen, feature, 
       dilution, plate_id, antibody_mfi, antibody_au,
       nominal_sample_dilution
     FROM ", source_schema, ".xmap_sample 
@@ -148,8 +148,11 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
     row <- results_data[i, ]
     
     # Map Source Sample -> Target Expsample
-    sample_id_str <- as.character(row$sampleid)
-    biosample_acc <- biosample_map[[sample_id_str]]
+    # biosample_map is keyed by sampleid_patientid (composite key from insert_biosamples)
+    patient_id_str <- if(!is.null(row$patientid) && length(row$patientid) > 0 && !is.na(row$patientid[[1]])) as.character(row$patientid[[1]]) else ""
+    sample_id_str <- as.character(row$sampleid[[1]])
+    composite_key <- paste0(sample_id_str, "_", patient_id_str)
+    biosample_acc <- biosample_map[[composite_key]]
     
     if(is.null(biosample_acc)) {
       skipped_count <- skipped_count + 1
@@ -168,13 +171,13 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       suppressWarnings(DBI::dbExecute(conn, paste0("SAVEPOINT ", sp_name)))
 
       # Per-row value computations
-      dilution_val <- if(!is.na(row$dilution)) as.character(row$dilution) else "1"
-      plate_val <- if(!is.null(row$plate_id) && !is.na(row$plate_id)) as.character(row$plate_id) else "UnknownPlate"
-      nominal_dilution <- if("nominal_sample_dilution" %in% names(row) && !is.na(row$nominal_sample_dilution)) as.character(row$nominal_sample_dilution) else dilution_val
+      dilution_val <- if(length(row$dilution) > 0 && !is.na(row$dilution[[1]])) as.character(row$dilution[[1]]) else "1"
+      plate_val <- if(!is.null(row$plate_id) && length(row$plate_id) > 0 && !is.na(row$plate_id[[1]])) as.character(row$plate_id[[1]]) else "UnknownPlate"
+      nominal_dilution <- if("nominal_sample_dilution" %in% names(row) && length(row$nominal_sample_dilution) > 0 && !is.na(row$nominal_sample_dilution[[1]])) as.character(row$nominal_sample_dilution[[1]]) else dilution_val
       assay_id_val <- paste0(plate_val, "|", nominal_dilution)
-      conc_val <- if(!is.na(row$antibody_au)) as.character(row$antibody_au) else NULL
-      mfi_val <- if(!is.na(row$antibody_mfi)) as.character(row$antibody_mfi) else NULL
-      analyte_val <- row$analyte_acc
+      conc_val <- if(length(row$antibody_au) > 0 && !is.na(row$antibody_au[[1]])) as.character(row$antibody_au[[1]]) else NA_character_
+      mfi_val <- if(length(row$antibody_mfi) > 0 && !is.na(row$antibody_mfi[[1]])) as.character(row$antibody_mfi[[1]]) else NA_character_
+      analyte_val <- row$analyte_acc[[1]]
 
       insert_q <- "
         INSERT INTO madi_dat.mbaa_result (
