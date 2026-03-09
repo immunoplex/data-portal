@@ -1559,18 +1559,18 @@ insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_ac
         assay_id <- paste0(plate_id, "|", nominal_dilution)
         
         # Concentration value (antibody_au)
-        antibody_au <- if(!is.null(row$antibody_au) && !is.na(row$antibody_au)) as.character(row$antibody_au) else NULL
+        antibody_au <- if(!is.null(row$antibody_au) && !is.na(row$antibody_au[[1]])) as.character(row$antibody_au[[1]]) else NA_character_
         
         # MFI value
-        antibody_mfi <- if(!is.null(row$antibody_mfi) && !is.na(row$antibody_mfi)) as.character(row$antibody_mfi) else NULL
+        antibody_mfi <- if(!is.null(row$antibody_mfi) && !is.na(row$antibody_mfi[[1]])) as.character(row$antibody_mfi[[1]]) else NA_character_
         
         # Arm Accession from mapping or source data
         arm_acc <- if(!is.null(map$arm_accession) && !is.na(map$arm_accession)) {
           map$arm_accession
-        } else if("arm_accession" %in% names(row) && !is.na(row$arm_accession)) {
-          row$arm_accession
+        } else if("arm_accession" %in% names(row) && length(row$arm_accession) > 0 && !is.na(row$arm_accession[[1]])) {
+          as.character(row$arm_accession[[1]])
         } else {
-          NULL
+          NA_character_
         }
         
         # 1. Insert Expsample Detail
