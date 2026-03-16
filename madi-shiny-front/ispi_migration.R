@@ -2369,8 +2369,75 @@ output$download_dq_report <- downloadHandler(
 # Execute LIVE migration (commit)
 observeEvent(input$execute_live_migration, {
   removeModal()
-  
-  # Final confirmation
+
+  # --- PRE-FLIGHT CHECK ---
+  # Query what's already in the DB for this experiment before showing the confirmation modal.
+  # This lets the user understand whether they're doing a first run or a re-run,
+  # and choose the right mode so nothing gets duplicated.
+  exp_acc <- if(isTRUE(input$create_new_experiment)) input$new_experiment_accession else input$target_experiment
+  existing <- tryCatch(
+    check_existing_migration_data(conn, exp_acc),
+    error = function(e) NULL
+  )
+
+  has_existing <- !is.null(existing) && any(unlist(existing) > 0, na.rm = TRUE)
+
+  if(has_existing) {
+    showModal(modalDialog(
+      title = div(icon("exclamation-triangle", style="color:#e67e22;"), " Pre-Flight Check: Existing Data Detected"),
+      size = "l",
+      div(
+        style = "padding: 10px;",
+        div(
+          style = "background-color: #fff3cd; border-left: 4px solid #e67e22; padding: 15px; border-radius: 5px; margin-bottom: 15px;",
+          h5(icon("database"), strong(" Experiment ", exp_acc, " already has data in the target database."),
+             style = "color: #856404; margin-top: 0;"),
+          p("Running the migration without choosing a mode below will ", strong("duplicate"), " all result data.",
+            style = "color: #856404; margin-bottom: 0;")
+        ),
+        h6("Current row counts:", style = "font-weight: bold; margin-bottom: 8px;"),
+        tags$table(
+          class = "table table-sm table-bordered",
+          style = "font-size: 0.9em;",
+          tags$thead(tags$tr(tags$th("Table"), tags$th("Existing Rows"), tags$th("Without re-run mode"))),
+          tags$tbody(
+            tags$tr(tags$td("Expsamples"),           tags$td(existing$expsamples %||% 0),     tags$td(span(style="color:green;", "✅ safe (keyed)"))),
+            tags$tr(tags$td("MBAA Results (samples)"),tags$td(existing$mbaa_expsample %||% 0),tags$td(if((existing$mbaa_expsample %||% 0) > 0) span(style="color:red;","⚠ will duplicate") else span(style="color:green;","✅ empty"))),
+            tags$tr(tags$td("MBAA Results (controls)"),tags$td(existing$mbaa_control %||% 0), tags$td(if((existing$mbaa_control %||% 0) > 0) span(style="color:red;","⚠ will duplicate") else span(style="color:green;","✅ empty"))),
+            tags$tr(tags$td("Control Samples"),      tags$td(existing$control_samples %||% 0),tags$td(span(style="color:green;","✅ safe (keyed)"))),
+            tags$tr(tags$td("Standard Curves"),      tags$td(existing$standard_curves %||% 0),tags$td(if((existing$standard_curves %||% 0) > 0) span(style="color:red;","⚠ will duplicate") else span(style="color:green;","✅ empty"))),
+            tags$tr(tags$td("Model QC"),             tags$td(existing$model_qc %||% 0),       tags$td(if((existing$model_qc %||% 0) > 0) span(style="color:red;","⚠ will duplicate") else span(style="color:green;","✅ empty"))),
+            tags$tr(tags$td("Sample QC"),            tags$td(existing$sample_qc %||% 0),      tags$td(if((existing$sample_qc %||% 0) > 0) span(style="color:red;","⚠ will duplicate") else span(style="color:green;","✅ empty")))
+          )
+        ),
+        hr(),
+        h6("Choose how to proceed:", style = "font-weight: bold;"),
+        radioButtons("rerun_mode_choice", NULL,
+          choices = list(
+            "Skip already-migrated tables — only fill gaps (safe re-run)" = "skip_existing",
+            "Clean slate — delete existing results and re-insert everything fresh" = "clean_slate"
+          ),
+          selected = "skip_existing"
+        ),
+        div(
+          style = "background-color: #f8d7da; padding: 10px; border-radius: 4px; margin-top: 5px;",
+          p(icon("info-circle"),
+            " 'Clean slate' deletes all result data for this experiment before re-inserting. ",
+            "It runs inside the migration transaction, so it rolls back automatically if the migration fails.",
+            style = "margin: 0; font-size: 0.85em; color: #721c24;")
+        )
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("preflight_confirmed", "Continue to Confirmation →", class = "btn-warning")
+      )
+    ))
+    return()
+  }
+
+  # No existing data — safe first run, go straight to final confirmation
+  migration_values$rerun_mode <- "first_run"
+
   # Final confirmation with operator info
   showModal(modalDialog(
     title = "FINAL CONFIRMATION",
@@ -2404,6 +2471,46 @@ observeEvent(input$execute_live_migration, {
       modalButton("Cancel"),
       actionButton("execute_live_confirmed", "Execute Live Migration", 
                   class = "btn-danger")
+    )
+  ))
+})
+
+# Pre-flight confirmed: store chosen rerun mode and proceed to final confirmation
+observeEvent(input$preflight_confirmed, {
+  removeModal()
+  migration_values$rerun_mode <- input$rerun_mode_choice %||% "skip_existing"
+  cat("[INFO] Pre-flight: rerun_mode set to", migration_values$rerun_mode, "\n")
+
+  showModal(modalDialog(
+    title = "FINAL CONFIRMATION",
+    div(
+      style = "padding: 15px;",
+      div(
+        style = "background-color: #f8d7da; padding: 20px; border-radius: 5px; margin-bottom: 15px;",
+        h4(icon("exclamation-triangle"), " WARNING: PRODUCTION DATABASE", style = "color: #721c24; margin-top: 0;"),
+        p("This will PERMANENTLY save data to the production database.", style = "color: #721c24; font-size: 1.1em;"),
+        p("This action cannot be undone!", style = "color: #721c24; font-weight: bold;")
+      ),
+      div(
+        style = "background-color: #e2f0d9; padding: 10px; border-radius: 4px; margin-bottom: 15px; border: 1px solid #a9d18e;",
+        p(icon("cog"), strong(" Re-run mode: "), migration_values$rerun_mode,
+          style = "margin: 0; color: #375623;")
+      ),
+      div(
+        style = "background-color: #e8f4fd; padding: 15px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #bee5eb;",
+        h5(icon("user-shield"), " Operator Identification", style = "color: #0c5460; margin-top: 0;"),
+        p("This information will be recorded in the audit trail.", style = "color: #6c757d; font-size: 0.85em;"),
+        fluidRow(
+          column(6, textInput("operator_name", "Full Name:", placeholder = "e.g., John Smith")),
+          column(6, textInput("operator_designation", "Designation / Role:", placeholder = "e.g., Data Engineer"))
+        )
+      ),
+      p("Type 'CONFIRM' to proceed:", style = "font-weight: bold;"),
+      textInput("final_confirmation", NULL, placeholder = "Type CONFIRM here")
+    ),
+    footer = tagList(
+      modalButton("Cancel"),
+      actionButton("execute_live_confirmed", "Execute Live Migration", class = "btn-danger")
     )
   ))
 })
@@ -2561,9 +2668,10 @@ observeEvent(input$execute_live_confirmed, {
     agroup_mapping = agroup_mapping,
     ispi_project_id = input$ispi_project_id,
     operator_name = operator_name,
-    operator_designation = operator_designation
+    operator_designation = operator_designation,
+    rerun_mode = migration_values$rerun_mode %||% "first_run"
   )
-  
+
   # Show processing modal
   showModal(modalDialog(
     title = "Migration In Progress",

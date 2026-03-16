@@ -73,13 +73,27 @@ ensure_analytes_exist <- function(conn, analytes, workspace_id) {
 # -----------------------------------------------------
 # INSERT MBAA RESULTS (Luminex Specific)
 # -----------------------------------------------------
-insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source, 
+insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
                                        workspace_id, study_accession, experiment_accession,
                                        expsample_map, biosample_map,
                                        result_schema = "MBAA", commit = FALSE,
-                                       source_conn = NULL) {
-  
+                                       source_conn = NULL, skip_if_exists = FALSE) {
+
   cat("[INFO] Processing MBAA/Luminex Results (Specific Logic)...\n")
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0(
+        "SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", experiment_accession,
+        "' AND source_type='EXPSAMPLE'"
+      ))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] Luminex MBAA results already exist (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = 0, failed = 0, preview = list()))
+    }
+  }
   
   # Use source_conn for fetching, fall back to conn
   fetch_conn <- if(!is.null(source_conn) && DBI::dbIsValid(source_conn)) source_conn else conn
@@ -137,7 +151,16 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
   
   # Pre-calc assay_group_id
   assay_group_id <- experiment_accession
-  
+
+  # Build biosample_acc -> expsample_acc lookup from the row-indexed sample_mapping
+  biosample_to_expsample <- list()
+  for(key in names(expsample_map)) {
+    entry <- expsample_map[[key]]
+    if(!is.null(entry$biosample_accession) && !is.null(entry$expsample_accession)) {
+      biosample_to_expsample[[ entry$biosample_accession ]] <- entry$expsample_accession
+    }
+  }
+
   # Loop
   total_rows <- nrow(results_data)
   prog_step <- max(1, floor(total_rows / 10))
@@ -159,7 +182,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       next 
     }
     
-    expsample_acc <- expsample_map[[biosample_acc]]
+    expsample_acc <- biosample_to_expsample[[biosample_acc]]
     
     if(is.null(expsample_acc)) {
       skipped_count <- skipped_count + 1

@@ -852,9 +852,9 @@ insert_arm_subject_associations <- function(conn, source_data, arm_mapping, work
     return(list(success = TRUE, inserted = inserted_count, existing = existing_count, failed = failed_items))
     
   }, error = function(e) {
-    DBI::dbExecute(conn, "ROLLBACK")
+    if(manage_transaction) DBI::dbExecute(conn, "ROLLBACK")
     cat("[ERROR] ERROR:", e$message, "\n")
-    cat("[ROLLBACK] Transaction rolled back\n")
+    if(manage_transaction) cat("[ROLLBACK] Transaction rolled back\n")
     return(list(success = FALSE, error = e$message))
   })
 }
@@ -1033,9 +1033,73 @@ insert_experiment_samples <- function(conn, source_data, timeperiod_mapping, wor
 }
 
 # =====================================================
+# RE-RUN SAFETY: Check existing data for an experiment
+# =====================================================
+# Returns counts of already-migrated data so the UI can warn users before re-running.
+# rerun_mode in config controls what execute_migration does when data already exists:
+#   "first_run"    (default) — normal insert, no checks; will duplicate non-keyed tables
+#   "skip_existing"          — skip insert steps that already have data for this experiment
+#   "clean_slate"            — delete existing result data first, then insert fresh
+check_existing_migration_data <- function(conn, experiment_accession) {
+  safe_count <- function(q) {
+    tryCatch(as.integer(DBI::dbGetQuery(conn, q)[[1]]), error = function(e) NA_integer_)
+  }
+  exp <- experiment_accession
+  list(
+    expsamples        = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.expsample WHERE experiment_accession='", exp, "'")),
+    mbaa_expsample    = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", exp, "' AND source_type='EXPSAMPLE'")),
+    mbaa_control      = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", exp, "' AND source_type='CONTROL SAMPLE'")),
+    control_samples   = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.control_sample WHERE experiment_accession='", exp, "'")),
+    standard_curves   = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "'")),
+    model_qc          = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.model_qc_data WHERE standard_curve_accession IN (SELECT standard_curve_accession FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "')")),
+    sample_qc         = safe_count(paste0("SELECT COUNT(*) FROM madi_dat.sample_qc_data WHERE expsample_accession IN (SELECT expsample_accession FROM madi_dat.expsample WHERE experiment_accession='", exp, "')"))
+  )
+}
+
+# Deletes all non-keyed result data for an experiment so a clean re-run can proceed.
+# Does NOT delete expsamples, biosamples, subjects, arms — only result-level data.
+# Called inside the global migration transaction so it rolls back if migration fails.
+clear_experiment_results <- function(conn, experiment_accession) {
+  exp <- experiment_accession
+  cat("[INFO] CLEAN SLATE: Clearing existing result data for", exp, "\n")
+
+  # model_qc_data links via standard_curve, must go first
+  n_mqc <- DBI::dbGetQuery(conn, paste0(
+    "SELECT COUNT(*) FROM madi_dat.model_qc_data WHERE standard_curve_accession IN ",
+    "(SELECT standard_curve_accession FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "')"
+  ))[[1]]
+  DBI::dbExecute(conn, paste0(
+    "DELETE FROM madi_dat.model_qc_data WHERE standard_curve_accession IN ",
+    "(SELECT standard_curve_accession FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "')"
+  ))
+  cat("  [OK] Deleted", n_mqc, "model_qc_data rows\n")
+
+  n_sc <- DBI::dbGetQuery(conn, paste0("SELECT COUNT(*) FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "'"))[[1]]
+  DBI::dbExecute(conn, paste0("DELETE FROM madi_dat.standard_curve WHERE experiment_accession='", exp, "'"))
+  cat("  [OK] Deleted", n_sc, "standard_curve rows\n")
+
+  n_sqc <- DBI::dbGetQuery(conn, paste0(
+    "SELECT COUNT(*) FROM madi_dat.sample_qc_data WHERE expsample_accession IN ",
+    "(SELECT expsample_accession FROM madi_dat.expsample WHERE experiment_accession='", exp, "')"
+  ))[[1]]
+  DBI::dbExecute(conn, paste0(
+    "DELETE FROM madi_dat.sample_qc_data WHERE expsample_accession IN ",
+    "(SELECT expsample_accession FROM madi_dat.expsample WHERE experiment_accession='", exp, "')"
+  ))
+  cat("  [OK] Deleted", n_sqc, "sample_qc_data rows\n")
+
+  n_mbaa <- DBI::dbGetQuery(conn, paste0("SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", exp, "'"))[[1]]
+  DBI::dbExecute(conn, paste0("DELETE FROM madi_dat.mbaa_result WHERE experiment_accession='", exp, "'"))
+  cat("  [OK] Deleted", n_mbaa, "mbaa_result rows\n")
+
+  cat("[OK] Clean slate complete for", exp, "\n")
+}
+
+# =====================================================
 # MASTER FUNCTION: Execute Full Migration
 # =====================================================
 # Orchestrates all migration steps in correct order
+# config$rerun_mode: "first_run" (default) | "skip_existing" | "clean_slate"
 execute_migration <- function(conn, source_data, config, commit = FALSE, source_conn = NULL, progress_cb = NULL) {
   
   cat("═══════════════════════════════════════════════════\n")
@@ -1050,14 +1114,25 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
     if(!is.null(progress_cb)) tryCatch(progress_cb(message, detail), error = function(e) {})
   }
 
+  # Resolve rerun mode (default: first_run)
+  rerun_mode <- config$rerun_mode %||% "first_run"
+  skip_existing <- (rerun_mode == "skip_existing")
+  cat("[INFO] Re-run mode:", rerun_mode, "\n")
+
   # Start Global Transaction for ALL modes
   # Test mode: ROLLBACK at end. Live mode: COMMIT at end.
   cat("\n[INFO] GLOBAL MIGRATION TRANSACTION STARTED\n")
   pcb("Starting migration...", "Opening database transaction")
   DBI::dbExecute(conn, "BEGIN")
-  
+
   tryCatch({
-  
+
+  # If clean_slate: delete all existing result data inside transaction (rolls back if migration fails)
+  if(rerun_mode == "clean_slate") {
+    pcb("Clearing existing data...", paste("Deleting previous results for", config$experiment_accession))
+    clear_experiment_results(conn, config$experiment_accession)
+  }
+
   # Step 0: Validate or Create Experiment
   cat("\n--- STEP 0: VALIDATE/CREATE EXPERIMENT ---\n")
   pcb("Step 1/9: Validating Experiment", paste("Checking", config$experiment_accession))
@@ -1157,7 +1232,8 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
     results$mbaa_results <- insert_mbaa_results(
       conn, source_data, results$expsamples$sample_mapping,
       config$experiment_accession, config$study_accession,
-      config$workspace_id, commit, manage_transaction = FALSE
+      config$workspace_id, commit, manage_transaction = FALSE,
+      skip_if_exists = skip_existing
     )
     # Capture preview from Step 6 (will be overwritten by Step 7-9 if luminex also runs)
     if(!is.null(results$mbaa_results$preview) && length(results$mbaa_results$preview) > 0) {
@@ -1310,27 +1386,28 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
       results$control_results <- insert_control_results(
          conn, ctrl_data, buff_data, std_data,
          config$workspace_id, study_acc_target, config$experiment_accession,
-         config$result_schema, commit
+         config$result_schema, commit, skip_if_exists = skip_existing
       )
-      
+
       # 10. Insert Standard Curves (using insert_standard_curves from ispi_migration_controls.R)
       results$standard_curves <- insert_standard_curves(
          conn, sc_data,
          config$workspace_id, study_acc_target, config$experiment_accession,
-         config$result_schema, commit
+         config$result_schema, commit, skip_if_exists = skip_existing
       )
-      
+
       # 11. Insert Model QC Data (linked to standard curves)
       if(nrow(model_qc_data) > 0 && !is.null(results$standard_curves$sc_accession_map)) {
         cat("\n--- STEP 11: MODEL QC DATA ---\n")
         results$model_qc <- insert_model_qc_data(
           conn, model_qc_data, results$standard_curves$sc_accession_map,
-          config$workspace_id, config$experiment_accession, commit
+          config$workspace_id, config$experiment_accession, commit,
+          skip_if_exists = skip_existing
         )
       } else {
         results$model_qc <- list(success = TRUE, inserted = 0, failed = 0)
       }
-      
+
       # 5. Insert Sample Results (Luminex/MBAA Specific - FETCH from source, INSERT to target)
       tech <- config$measurement_technique %||% "Luminex"
       if(tech %in% c("Luminex", "MBAA")) {
@@ -1340,19 +1417,21 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
           results$expsamples$sample_mapping,
           results$biosamples$biosample_map,
           config$result_schema, commit,
-          source_conn = fetch_conn  # Pass source connection for data fetching
+          source_conn = fetch_conn,
+          skip_if_exists = skip_existing
         )
         if(!is.null(results$luminex_results$preview)) {
           results$preview_data <- results$luminex_results$preview
         }
       }
-      
+
       # 12. Insert Sample QC Data (linked to expsamples)
       if(nrow(sample_qc_data) > 0 && !is.null(results$expsamples$sample_mapping)) {
         cat("\n--- STEP 12: SAMPLE QC DATA ---\n")
         results$sample_qc <- insert_sample_qc_data(
           conn, sample_qc_data, results$expsamples$sample_mapping,
-          config$workspace_id, config$experiment_accession, commit
+          config$workspace_id, config$experiment_accession, commit,
+          skip_if_exists = skip_existing
         )
       } else {
         results$sample_qc <- list(success = TRUE, inserted = 0, failed = 0)
@@ -1479,13 +1558,24 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
 # 6. INSERT MBAA RESULTS
 # =====================================================
 # Inserts result data into expsample_mbaa_detail and mbaa_result
-insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_accession, study_accession, workspace_id, commit = FALSE, manage_transaction = TRUE) {
-  
+insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_accession, study_accession, workspace_id, commit = FALSE, manage_transaction = TRUE, skip_if_exists = FALSE) {
+
   cat("[INFO] Creating MBAA Results (Detail + Result Table)\n")
-  
+
   if(length(sample_mapping) == 0) {
     cat("[WARN] No sample mapping provided, skipping result insertion\n")
     return(list(success = TRUE, inserted = 0))
+  }
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0("SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", experiment_accession, "' AND source_type='EXPSAMPLE'"))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] MBAA results already exist (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = 0, inserted_result = 0, skipped_existing = existing_n))
+    }
   }
 
   # Start transaction

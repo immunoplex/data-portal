@@ -160,10 +160,21 @@ insert_control_samples <- function(conn, control_data, buffer_data, standard_dat
 # Only fills MFI (no AU/concentration)
 insert_control_results <- function(conn, control_data, buffer_data, standard_data,
                                     workspace_id, study_accession, experiment_accession,
-                                    result_schema = "MBAA", commit = FALSE) {
-  
+                                    result_schema = "MBAA", commit = FALSE, skip_if_exists = FALSE) {
+
   total <- nrow(control_data) + nrow(buffer_data) + nrow(standard_data)
   cat(paste0("[INFO] Processing Control/Standard MBAA Results (", total, " rows)...\n"))
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0("SELECT COUNT(*) FROM madi_dat.mbaa_result WHERE experiment_accession='", experiment_accession, "' AND source_type='CONTROL SAMPLE'"))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] Control MBAA results already exist (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = existing_n, failed = 0))
+    }
+  }
   
   inserted_count <- 0
   failed_count <- 0
@@ -322,14 +333,25 @@ insert_control_results <- function(conn, control_data, buffer_data, standard_dat
 # 10. INSERT STANDARD CURVES
 # -----------------------------------------------------
 # Migrates standard curve data from best_glance_all to standard_curve
-insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession, 
-                                   experiment_accession, result_schema = "MBAA", commit = FALSE) {
-  
+insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession,
+                                   experiment_accession, result_schema = "MBAA", commit = FALSE, skip_if_exists = FALSE) {
+
   if(nrow(fit_data) == 0) {
     cat("[INFO] No standard curve fit data to insert.\n")
-    return(list(success = TRUE, inserted = 0, failed = 0))
+    return(list(success = TRUE, inserted = 0, failed = 0, sc_accession_map = list()))
   }
-  
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0("SELECT COUNT(*) FROM madi_dat.standard_curve WHERE experiment_accession='", experiment_accession, "'"))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] Standard curves already exist (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = 0, failed = 0, sc_accession_map = list()))
+    }
+  }
+
   cat(paste0("[INFO] Processing Standard Curves (", nrow(fit_data), " rows)...\n"))
   
   inserted_count <- 0
@@ -454,14 +476,28 @@ insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession
 # Insert Sample QC Data (from get_sample_qc_data function)
 # Links each row to an expsample_accession via plate+well+experiment+patientid
 # =============================================================================
-insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_id, 
-                                   experiment_accession, commit = FALSE) {
-  
+insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_id,
+                                   experiment_accession, commit = FALSE, skip_if_exists = FALSE) {
+
   if(is.null(sample_qc_df) || nrow(sample_qc_df) == 0) {
     cat("[INFO] No sample QC data to insert.\n")
     return(list(success = TRUE, inserted = 0, failed = 0))
   }
-  
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0(
+        "SELECT COUNT(*) FROM madi_dat.sample_qc_data WHERE expsample_accession IN ",
+        "(SELECT expsample_accession FROM madi_dat.expsample WHERE experiment_accession='", experiment_accession, "')"
+      ))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] Sample QC data already exists (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = 0, failed = 0))
+    }
+  }
+
   cat(paste0("[INFO] Processing Sample QC Data (", nrow(sample_qc_df), " rows)...\n"))
   
   # Build a patientid → expsample_accession lookup table from sample_mapping
@@ -563,13 +599,27 @@ insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_
 # Links each row to a standard_curve_accession via plate+antigen+experiment
 # =============================================================================
 insert_model_qc_data <- function(conn, model_qc_df, sc_accession_map, workspace_id,
-                                  experiment_accession, commit = FALSE) {
-  
+                                  experiment_accession, commit = FALSE, skip_if_exists = FALSE) {
+
   if(is.null(model_qc_df) || nrow(model_qc_df) == 0) {
     cat("[INFO] No model QC data to insert.\n")
     return(list(success = TRUE, inserted = 0, failed = 0))
   }
-  
+
+  if(skip_if_exists) {
+    existing_n <- tryCatch(
+      as.integer(DBI::dbGetQuery(conn, paste0(
+        "SELECT COUNT(*) FROM madi_dat.model_qc_data WHERE standard_curve_accession IN ",
+        "(SELECT standard_curve_accession FROM madi_dat.standard_curve WHERE experiment_accession='", experiment_accession, "')"
+      ))[[1]]),
+      error = function(e) 0L
+    )
+    if(existing_n > 0) {
+      cat("[SKIP] Model QC data already exists (", existing_n, "rows) — skipping insert (skip_existing mode)\n")
+      return(list(success = TRUE, inserted = 0, failed = 0))
+    }
+  }
+
   cat(paste0("[INFO] Processing Model QC Data (", nrow(model_qc_df), " rows)...\n"))
   
   inserted_count <- 0
