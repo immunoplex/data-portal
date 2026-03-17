@@ -152,12 +152,17 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
   # Pre-calc assay_group_id
   assay_group_id <- experiment_accession
 
-  # Build biosample_acc -> expsample_acc lookup from the row-indexed sample_mapping
-  biosample_to_expsample <- list()
+  # Build biosample_acc -> expsample_acc / subject_accession / arm_accession lookups
+  biosample_to_expsample  <- list()
+  biosample_to_subject    <- list()
+  biosample_to_arm        <- list()
   for(key in names(expsample_map)) {
     entry <- expsample_map[[key]]
     if(!is.null(entry$biosample_accession) && !is.null(entry$expsample_accession)) {
-      biosample_to_expsample[[ entry$biosample_accession ]] <- entry$expsample_accession
+      bs <- entry$biosample_accession
+      biosample_to_expsample[[ bs ]] <- entry$expsample_accession
+      if(!is.null(entry$subject_accession)) biosample_to_subject[[ bs ]] <- entry$subject_accession
+      if(!is.null(entry$arm_accession))     biosample_to_arm[[     bs ]] <- entry$arm_accession
     }
   }
 
@@ -202,20 +207,27 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       mfi_val <- if(length(row$antibody_mfi) > 0 && !is.na(row$antibody_mfi[[1]])) as.character(row$antibody_mfi[[1]]) else NA_character_
       analyte_val <- row$analyte_acc[[1]]
 
+      subject_acc_val  <- biosample_to_subject[[ biosample_acc ]]
+      arm_acc_val      <- biosample_to_arm[[     biosample_acc ]]
+
       insert_q <- "
         INSERT INTO madi_dat.mbaa_result (
           experiment_accession, study_accession, workspace_id,
           source_type, source_accession,
+          biosample_accession, subject_accession, arm_accession,
           analyte_accession, analyte_reported,
           assay_group_id, assay_id,
           concentration_unit_reported, concentration_value_reported,
           mfi, mfi_coordinate
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       "
 
       DBI::dbExecute(conn, insert_q, params = list(
         experiment_accession, study_accession, workspace_id,
         "EXPSAMPLE", expsample_acc,
+        biosample_acc,
+        if(is.null(subject_acc_val)) NA_character_ else subject_acc_val,
+        if(is.null(arm_acc_val))     NA_character_ else arm_acc_val,
         analyte_val, analyte_val,
         assay_group_id, assay_id_val,
         "AU", conc_val,
