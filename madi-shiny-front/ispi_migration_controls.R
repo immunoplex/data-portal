@@ -500,24 +500,36 @@ insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_
 
   cat(paste0("[INFO] Processing Sample QC Data (", nrow(sample_qc_df), " rows)...\n"))
   
-  # Build a patientid → expsample_accession lookup table from sample_mapping
-  # sample_mapping is keyed by row index, each entry has patientid, expsample_accession, etc.
-  patient_lookup <- list()
+  # Build lookup tables from sample_mapping:
+  #   1. patientid|well  -> expsample (for multi-sampleid experiments like IgG4 where
+  #      one patient has multiple expsamples, one per timeperiod/well)
+  #   2. patientid alone -> expsample (fallback for 1:1 experiments like ADCP)
+  # QC data has plate_well which matches the well column in xmap_sample / sample_mapping.
+  patient_well_lookup <- list()   # keyed by "patientid|well"
+  patient_lookup      <- list()   # keyed by "patientid" (fallback)
   if(!is.null(sample_mapping)) {
     for(key in names(sample_mapping)) {
       entry <- sample_mapping[[key]]
-      pid <- as.character(entry$patientid)
+      pid  <- as.character(entry$patientid)
+      well <- if(!is.null(entry$well) && !is.na(entry$well)) as.character(entry$well) else ""
       if(!is.null(pid) && !is.na(pid) && pid != "") {
-        # Store first expsample per patient (they share the same expsample if same plate/well)
+        composite_key <- paste0(pid, "|", well)
+        if(well != "" && is.null(patient_well_lookup[[composite_key]])) {
+          patient_well_lookup[[composite_key]] <- entry$expsample_accession
+        }
         if(is.null(patient_lookup[[pid]])) {
           patient_lookup[[pid]] <- entry$expsample_accession
         }
       }
     }
   }
-  
-  cat(paste0("[INFO] Built patient lookup: ", length(patient_lookup), " unique patients mapped to expsamples\n"))
-  
+
+  multi_sample <- length(patient_well_lookup) > length(patient_lookup)
+  cat(paste0("[INFO] Built patient lookup: ", length(patient_lookup), " unique patients, ",
+             length(patient_well_lookup), " patient+well combos",
+             if(multi_sample) " (multi-sampleid experiment — using well-based lookup)" else "",
+             "\n"))
+
   if(length(patient_lookup) == 0) {
     cat("[WARN] No patient-to-expsample mappings found. Cannot insert sample QC data.\n")
     return(list(success = TRUE, inserted = 0, failed = 0))
@@ -544,13 +556,16 @@ insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_
     tryCatch({
       suppressWarnings(DBI::dbExecute(conn, paste0("SAVEPOINT ", sp_name)))
       
-      # Look up expsample by patientid (subject_id in QC data)
+      # Look up expsample: try patientid|well composite first (multi-sampleid experiments),
+      # fall back to patientid alone (1:1 experiments like ADCP)
       patient_id <- as.character(row$subject_id)[[1]]
-      matched_expsample <- patient_lookup[[patient_id]]
-      
+      well_val   <- if(!is.null(row$plate_well) && !is.na(row$plate_well)) as.character(row$plate_well)[[1]] else ""
+      composite  <- paste0(patient_id, "|", well_val)
+      matched_expsample <- patient_well_lookup[[composite]] %||% patient_lookup[[patient_id]]
+
       if(is.null(matched_expsample)) {
         suppressWarnings(DBI::dbExecute(conn, paste0("ROLLBACK TO SAVEPOINT ", sp_name)))
-        if(skipped_count < 3) cat("[WARN] No matching expsample for patient:", patient_id, "\n")
+        if(skipped_count < 3) cat("[WARN] No matching expsample for patient:", patient_id, "well:", well_val, "\n")
         skipped_count <- skipped_count + 1
         next
       }

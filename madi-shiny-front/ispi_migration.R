@@ -9,9 +9,24 @@ output$migration_ui <- renderUI({
     # Header
     div(
       style = "background: linear-gradient(135deg, #8e44ad, #9b59b6); padding: 20px; border-radius: 10px; margin-bottom: 20px; color: white;",
-      h2("I-SPI Data Migration", style = "margin: 0; color: white;"),
-      p("Connect to I-SPI database and preview data before migration", 
-        style = "margin: 10px 0 0 0; color: #f8f9fa;")
+      div(style = "display: flex; justify-content: space-between; align-items: flex-start;",
+        div(
+          h2("I-SPI Data Migration", style = "margin: 0; color: white;"),
+          p("Connect to I-SPI database and preview data before migration",
+            style = "margin: 10px 0 0 0; color: #f8f9fa;")
+        ),
+        div(
+          style = "text-align: right; font-size: 11px; color: rgba(255,255,255,0.75); font-family: monospace;",
+          p(paste0("v ", {
+            tryCatch(
+              system("git rev-parse --short HEAD 2>/dev/null", intern = TRUE),
+              error = function(e) "unknown"
+            )
+          }), style = "margin: 0;"),
+          p(paste0("loaded: ", format(Sys.time(), "%Y-%m-%d %H:%M")), style = "margin: 2px 0 0 0;"),
+          p("⚠ Restart app after git pull", style = "margin: 4px 0 0 0; color: #ffe082; font-style: italic;")
+        )
+      )
     ),
     
     # Workspace Context Panel

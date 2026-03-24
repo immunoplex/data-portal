@@ -1958,6 +1958,83 @@ generate_dq_audit_report <- function(conn, experiment_accession) {
   })
   add("")
   
+  # Check 4b: subject / biosample / arm coverage on EXPSAMPLE rows
+  tryCatch({
+    cov <- DBI::dbGetQuery(conn, paste0(
+      "SELECT ",
+      "count(*) AS total, ",
+      "count(subject_accession) AS has_subject, ",
+      "count(biosample_accession) AS has_biosample, ",
+      "count(arm_accession) AS has_arm ",
+      "FROM madi_dat.mbaa_result ",
+      "WHERE experiment_accession = '", experiment_accession, "' AND source_type = 'EXPSAMPLE'"
+    ))
+    total_es <- safe_int(cov$total)
+    if(isTRUE(total_es > 0L)) {
+      for(field in c("has_subject", "has_biosample", "has_arm")) {
+        n_has  <- safe_int(cov[[field]])
+        label  <- sub("has_", "", field)
+        label  <- paste0(toupper(substring(label, 1, 1)), substring(label, 2), " coverage")
+        if(isTRUE(n_has == total_es)) {
+          add(sprintf("  ✅ EXPSAMPLE %-25s %d/%d (100%%)", label, n_has, total_es))
+          checks_passed <- checks_passed + 1
+        } else {
+          n_miss <- total_es - n_has
+          pct    <- round(n_has / total_es * 100, 1)
+          add(sprintf("  🔴 CRITICAL: EXPSAMPLE %-20s %d/%d populated (%.1f%%) — %d rows missing",
+                      label, n_has, total_es, pct, n_miss))
+          add(paste0("     Action: Run backfill UPDATE joining expsample_2_biosample → biosample → arm_2_subject."))
+          criticals_count <- criticals_count + 1
+        }
+      }
+    }
+  }, error = function(e) {
+    add(paste0("  ⚠ Could not check EXPSAMPLE coverage: ", e$message))
+  })
+  add("")
+
+  # Check 4c: concentration_value_reported on EXPSAMPLE rows only
+  # Controls do NOT have concentration (raw MFI only) — this check is EXPSAMPLE-specific
+  tryCatch({
+    conc_check <- DBI::dbGetQuery(conn, paste0(
+      "SELECT count(*) AS total, ",
+      "count(concentration_value_reported) AS has_conc ",
+      "FROM madi_dat.mbaa_result ",
+      "WHERE experiment_accession = '", experiment_accession, "' AND source_type = 'EXPSAMPLE'"
+    ))
+    total_es  <- safe_int(conc_check$total)
+    has_conc  <- safe_int(conc_check$has_conc)
+    null_conc <- total_es - has_conc
+    if(isTRUE(total_es > 0L)) {
+      pct <- round(has_conc / total_es * 100, 1)
+      if(isTRUE(null_conc == 0L)) {
+        add(sprintf("  ✅ EXPSAMPLE Concentration (AU): %d/%d populated (100%%)", has_conc, total_es))
+        checks_passed <- checks_passed + 1
+      } else {
+        add(sprintf("  🟡 WARNING: EXPSAMPLE Concentration (AU): %d/%d null (%.1f%% missing)",
+                    null_conc, total_es, 100 - pct))
+        add("     Note: Controls are expected to have null concentration (MFI only).")
+        add("     For EXPSAMPLE rows, null AU means antibody_au was NA in xmap_sample source.")
+        warnings_count <- warnings_count + 1
+      }
+    }
+    # Controls — explicitly note concentration is expected null
+    ctrl_conc <- safe_int(DBI::dbGetQuery(conn, paste0(
+      "SELECT count(concentration_value_reported) AS n FROM madi_dat.mbaa_result ",
+      "WHERE experiment_accession = '", experiment_accession, "' AND source_type = 'CONTROL SAMPLE'"
+    ))$n)
+    ctrl_total <- safe_int(DBI::dbGetQuery(conn, paste0(
+      "SELECT count(*) AS n FROM madi_dat.mbaa_result ",
+      "WHERE experiment_accession = '", experiment_accession, "' AND source_type = 'CONTROL SAMPLE'"
+    ))$n)
+    if(isTRUE(ctrl_total > 0L)) {
+      add(sprintf("  ℹ CONTROL concentration: null by design (raw MFI only) — %d rows", ctrl_total))
+    }
+  }, error = function(e) {
+    add(paste0("  ⚠ Could not check concentration coverage: ", e$message))
+  })
+  add("")
+
   # Check 5: Control MFI nulls
   tryCatch({
     ctrl_mfi <- DBI::dbGetQuery(conn, paste0(
@@ -2013,6 +2090,35 @@ generate_dq_audit_report <- function(conn, experiment_accession) {
     ))$n[1]
     add(sprintf("  ℹ Distinct analytes: %d", n_analytes))
   }, error = function(e) {})
+  add("")
+
+  # Check 8: Sample QC — ratio of inserted vs expected (expsamples × analytes from source)
+  tryCatch({
+    sqc_count  <- safe_int(counts[["sample_qc_data"]])
+    es_count   <- safe_int(counts[["expsample"]])
+    if(isTRUE(sqc_count == 0L) && isTRUE(es_count > 0L)) {
+      add("  🔴 CRITICAL: Sample QC Data is empty (0 rows)")
+      add("     Cause: patient_lookup may have failed — check if patientid+well composite key matches QC source subject_id+plate_well.")
+      add("     Action: Verify get_sample_qc_data returns rows for this experiment in I-SPI source.")
+      criticals_count <- criticals_count + 1
+    } else if(isTRUE(sqc_count > 0L)) {
+      # Expected: at least 1 QC row per expsample
+      if(isTRUE(sqc_count >= es_count)) {
+        add(sprintf("  ✅ Sample QC Data: %d rows for %d expsamples (%.1fx per sample)",
+                    sqc_count, es_count, sqc_count / max(es_count, 1)))
+        checks_passed <- checks_passed + 1
+      } else {
+        add(sprintf("  🟡 WARNING: Sample QC Data: only %d rows for %d expsamples — possible skips",
+                    sqc_count, es_count))
+        add("     Cause: Some patientid+well combos in QC source may not match any expsample.")
+        warnings_count <- warnings_count + 1
+      }
+    } else {
+      add("  ℹ Sample QC: no expsamples to check against")
+    }
+  }, error = function(e) {
+    add(paste0("  ⚠ Could not check sample QC: ", e$message))
+  })
   add("")
   
   # --- ASSAY GROUP BREAKDOWN ---
