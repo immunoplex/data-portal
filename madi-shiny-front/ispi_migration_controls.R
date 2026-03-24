@@ -35,10 +35,13 @@ insert_control_samples <- function(conn, control_data, buffer_data, standard_dat
     )
     source_id <- as.character(row[[id_col]])[[1]]
     
-    # "cs_123456" = 9 chars (safely under 15)
-    acc <- paste0(prefix, source_id)
-    
-    # Check if exists
+    # Include experiment_accession in key so each experiment gets its own control_sample records
+    # e.g. cs_EXP95733_33806 — xmap ids are reused across experiments in I-SPI
+    acc_full <- paste0(prefix, experiment_accession, "_", source_id)
+    # Truncate to 15 chars max (portal DB limit): take prefix + last N chars of remainder
+    acc <- if(nchar(acc_full) <= 15) acc_full else paste0(prefix, substr(experiment_accession, nchar(experiment_accession)-4, nchar(experiment_accession)), substr(source_id, max(1, nchar(source_id)-7), nchar(source_id)))
+
+    # Check if exists for this experiment
     exists_query <- "SELECT control_sample_accession FROM madi_dat.control_sample WHERE control_sample_accession = $1"
     existing <- suppressWarnings(DBI::dbGetQuery(conn, exists_query, params = list(acc)))
     
@@ -200,7 +203,7 @@ insert_control_results <- function(conn, control_data, buffer_data, standard_dat
   
   # 2. Helper to insert a single MBAA result row
   insert_one_result <- function(row, type) {
-    # Build accession using the SAME format as process_control_row (cs_, cb_, st_)
+    # Build accession using the SAME format as process_control_row (experiment-scoped)
     prefix <- switch(type,
       "control" = "cs_",
       "blank"   = "cb_",
@@ -212,7 +215,8 @@ insert_control_results <- function(conn, control_data, buffer_data, standard_dat
       "standard" = "xmap_standard_id"
     )
     source_id <- as.character(row[[id_col]])[1]
-    source_acc <- paste0(prefix, source_id)
+    acc_full  <- paste0(prefix, experiment_accession, "_", source_id)
+    source_acc <- if(nchar(acc_full) <= 15) acc_full else paste0(prefix, substr(experiment_accession, nchar(experiment_accession)-4, nchar(experiment_accession)), substr(source_id, max(1, nchar(source_id)-7), nchar(source_id)))
     
     # Build analyte string: antigen|feature (same pattern as expsample MBAA results)
     antigen <- if(!is.null(row$antigen) && !is.na(row$antigen)) as.character(row$antigen)[1] else ""
