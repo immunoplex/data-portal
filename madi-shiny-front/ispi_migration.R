@@ -17,14 +17,7 @@ output$migration_ui <- renderUI({
         ),
         div(
           style = "text-align: right; font-size: 11px; color: rgba(255,255,255,0.75); font-family: monospace;",
-          p(paste0("v ", {
-            tryCatch(
-              system("git rev-parse --short HEAD 2>/dev/null", intern = TRUE),
-              error = function(e) "unknown"
-            )
-          }), style = "margin: 0;"),
-          p(paste0("loaded: ", format(Sys.time(), "%Y-%m-%d %H:%M")), style = "margin: 2px 0 0 0;"),
-          p("⚠ Restart app after git pull", style = "margin: 4px 0 0 0; color: #ffe082; font-style: italic;")
+          p(paste0("loaded: ", format(Sys.time(), "%Y-%m-%d %H:%M")), style = "margin: 0;")
         )
       )
     ),
