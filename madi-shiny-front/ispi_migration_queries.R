@@ -1273,7 +1273,29 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
     config$workspace_id, config$study_accession,
     commit, manage_transaction = FALSE
   )
-  
+
+  # Backfill arm_accession on any mbaa_result EXPSAMPLE rows that are still NULL.
+  # agroup_mapping may miss some rows if agroup values differ across source experiments,
+  # so we do a definitive UPDATE here using arm_2_subject (just populated above).
+  if(!is.null(config$experiment_accession) && !is.null(config$study_accession)) {
+    tryCatch({
+      backfill_n <- DBI::dbExecute(conn, paste0(
+        "UPDATE madi_dat.mbaa_result r ",
+        "SET arm_accession = a2s.arm_accession ",
+        "FROM madi_dat.arm_2_subject a2s ",
+        "JOIN madi_dat.arm_or_cohort aoc ON aoc.arm_accession = a2s.arm_accession ",
+        "  AND aoc.study_accession = '", config$study_accession, "' ",
+        "WHERE r.subject_accession = a2s.subject_accession ",
+        "  AND r.experiment_accession = '", config$experiment_accession, "' ",
+        "  AND r.source_type = 'EXPSAMPLE' ",
+        "  AND r.arm_accession IS NULL"
+      ))
+      if(backfill_n > 0) cat(paste0("[INFO] Backfilled arm_accession on ", backfill_n, " mbaa_result rows via arm_2_subject\n"))
+    }, error = function(e) {
+      cat(paste0("[WARN] arm_accession backfill failed: ", e$message, "\n"))
+    })
+  }
+
   # ==========================================================================
   # Step 7-9: Controls and Standards (MBAA Only)
   # ==========================================================================
