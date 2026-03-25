@@ -77,7 +77,8 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
                                        workspace_id, study_accession, experiment_accession,
                                        expsample_map, biosample_map,
                                        result_schema = "MBAA", commit = FALSE,
-                                       source_conn = NULL, skip_if_exists = FALSE) {
+                                       source_conn = NULL, skip_if_exists = FALSE,
+                                       agroup_mapping = NULL) {
 
   cat("[INFO] Processing MBAA/Luminex Results (Specific Logic)...\n")
 
@@ -108,11 +109,11 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
   cat("\n")
   
   query <- paste0("
-    SELECT 
-      xmap_sample_id, sampleid, patientid, antigen, feature, 
+    SELECT
+      xmap_sample_id, sampleid, patientid, antigen, feature,
       dilution, plate_id, antibody_mfi, antibody_au,
-      nominal_sample_dilution
-    FROM ", source_schema, ".xmap_sample 
+      nominal_sample_dilution, agroup
+    FROM ", source_schema, ".xmap_sample
     WHERE study_accession = $1
   ")
   
@@ -208,7 +209,10 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       analyte_val <- row$analyte_acc[[1]]
 
       subject_acc_val  <- biosample_to_subject[[ biosample_acc ]]
-      arm_acc_val      <- biosample_to_arm[[     biosample_acc ]]
+      # Resolve arm via agroup_mapping (agroup col from xmap_sample) — biosample_to_arm is empty
+      # because xmap_sample has `agroup`, not `arm_accession`
+      agroup_val <- if("agroup" %in% names(row) && !is.null(row$agroup[[1]]) && !is.na(row$agroup[[1]])) as.character(row$agroup[[1]]) else NULL
+      arm_acc_val <- if(!is.null(agroup_val) && !is.null(agroup_mapping)) agroup_mapping[[ agroup_val ]] else biosample_to_arm[[ biosample_acc ]]
 
       insert_q <- "
         INSERT INTO madi_dat.mbaa_result (

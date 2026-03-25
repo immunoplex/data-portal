@@ -1418,7 +1418,8 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
           results$biosamples$biosample_map,
           config$result_schema, commit,
           source_conn = fetch_conn,
-          skip_if_exists = skip_existing
+          skip_if_exists = skip_existing,
+          agroup_mapping = config$agroup_mapping
         )
         if(!is.null(results$luminex_results$preview)) {
           results$preview_data <- results$luminex_results$preview
