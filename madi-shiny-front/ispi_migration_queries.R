@@ -1092,6 +1092,14 @@ clear_experiment_results <- function(conn, experiment_accession) {
   DBI::dbExecute(conn, paste0("DELETE FROM madi_dat.mbaa_result WHERE experiment_accession='", exp, "'"))
   cat("  [OK] Deleted", n_mbaa, "mbaa_result rows\n")
 
+  n_detail <- DBI::dbGetQuery(conn, paste0(
+    "SELECT COUNT(*) FROM madi_dat.expsample_mbaa_detail WHERE assay_group_id='", exp, "'"
+  ))[[1]]
+  DBI::dbExecute(conn, paste0(
+    "DELETE FROM madi_dat.expsample_mbaa_detail WHERE assay_group_id='", exp, "'"
+  ))
+  cat("  [OK] Deleted", n_detail, "expsample_mbaa_detail rows\n")
+
   cat("[OK] Clean slate complete for", exp, "\n")
 }
 
