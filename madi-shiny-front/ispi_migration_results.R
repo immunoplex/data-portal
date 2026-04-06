@@ -222,6 +222,18 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       agroup_val <- if("agroup" %in% names(row) && !is.null(row$agroup[[1]]) && !is.na(row$agroup[[1]])) as.character(row$agroup[[1]]) else NULL
       arm_acc_val <- if(!is.null(agroup_val) && !is.null(agroup_mapping)) agroup_mapping[[ agroup_val ]] else biosample_to_arm[[ biosample_acc ]]
 
+      # Insert expsample_mbaa_detail (one row per expsample, skip if already exists)
+      existing_detail <- suppressWarnings(DBI::dbGetQuery(conn,
+        "SELECT 1 FROM madi_dat.expsample_mbaa_detail WHERE expsample_accession = $1",
+        params = list(expsample_acc)))
+      if(nrow(existing_detail) == 0) {
+        DBI::dbExecute(conn,
+          "INSERT INTO madi_dat.expsample_mbaa_detail
+           (expsample_accession, assay_group_id, assay_id, dilution_factor)
+           VALUES ($1, $2, $3, $4)",
+          params = list(expsample_acc, assay_group_id, assay_id_val, dilution_val))
+      }
+
       insert_q <- "
         INSERT INTO madi_dat.mbaa_result (
           experiment_accession, study_accession, workspace_id,
