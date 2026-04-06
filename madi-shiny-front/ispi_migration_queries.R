@@ -1233,17 +1233,21 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
   #==========================================================================
   
   # Step 6: Insert MBAA Results (if applicable)
-  # This uses the mapping from Step 5 to link results to created experiment samples
+  # Skip this step when a source DB connection is available — the luminex path
+  # (insert_mbaa_results_luminex) handles it with proper experiment filtering.
+  # This path only runs for uploaded-file-only migrations (no I-SPI source DB).
   cat("\n--- STEP 6: INSERT RESULTS ---\n")
   pcb("Step 6/9: MBAA Results", paste("Inserting assay results (this is the longest step)"))
-  if(!is.null(config$result_schema_type) && config$result_schema_type == "MBAA") {
+  tech <- config$measurement_technique %||% "Luminex"
+  if(!is.null(source_conn) && tech %in% c("Luminex", "MBAA")) {
+    cat("[INFO] Skipping Step 6 — luminex path will handle result insertion from source DB\n")
+  } else if(!is.null(config$result_schema_type) && config$result_schema_type == "MBAA") {
     results$mbaa_results <- insert_mbaa_results(
       conn, source_data, results$expsamples$sample_mapping,
       config$experiment_accession, config$study_accession,
       config$workspace_id, commit, manage_transaction = FALSE,
       skip_if_exists = skip_existing
     )
-    # Capture preview from Step 6 (will be overwritten by Step 7-9 if luminex also runs)
     if(!is.null(results$mbaa_results$preview) && length(results$mbaa_results$preview) > 0) {
       results$preview_data <- results$mbaa_results$preview
     }
