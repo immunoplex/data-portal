@@ -1684,7 +1684,10 @@ insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_ac
         
         # MFI value
         antibody_mfi <- if(!is.null(row$antibody_mfi) && !is.na(row$antibody_mfi[[1]])) as.character(row$antibody_mfi[[1]]) else NA_character_
-        
+
+        # Well (mfi_coordinate)
+        well_val <- if("well" %in% names(row) && !is.null(row$well) && !is.na(row$well[[1]])) as.character(row$well[[1]]) else NA_character_
+
         # Arm Accession from mapping or source data
         arm_acc <- if(!is.null(map$arm_accession) && !is.na(map$arm_accession)) {
           map$arm_accession
@@ -1711,15 +1714,15 @@ insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_ac
         
         # 2. Insert MBAA Result (all fields per spec)
         DBI::dbExecute(conn,
-          "INSERT INTO madi_dat.mbaa_result 
+          "INSERT INTO madi_dat.mbaa_result
            (experiment_accession, study_accession, workspace_id,
             subject_accession, arm_accession, biosample_accession,
             source_accession, source_type,
             analyte_accession, analyte_reported,
             assay_group_id, assay_id,
             concentration_unit_reported, concentration_value_reported,
-            mfi) 
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+            mfi, mfi_coordinate)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
           params = list(
             experiment_accession,           # $1
             study_accession,                # $2
@@ -1735,7 +1738,8 @@ insert_mbaa_results <- function(conn, source_data, sample_mapping, experiment_ac
             assay_id,                       # $12 assay_id
             "AU",                           # $13 concentration_unit_reported
             antibody_au,                    # $14 concentration_value_reported
-            antibody_mfi                    # $15 mfi
+            antibody_mfi,                   # $15 mfi
+            well_val                        # $16 mfi_coordinate
           )
         )
         

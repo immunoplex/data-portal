@@ -112,7 +112,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
     SELECT
       xmap_sample_id, sampleid, patientid, antigen, feature,
       dilution, plate_id, antibody_mfi, antibody_au,
-      nominal_sample_dilution, agroup
+      nominal_sample_dilution, agroup, well
     FROM ", source_schema, ".xmap_sample
     WHERE study_accession = $1
   ")
@@ -206,6 +206,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       assay_id_val <- paste0(plate_val, "|", nominal_dilution)
       conc_val <- if(length(row$antibody_au) > 0 && !is.na(row$antibody_au[[1]])) as.character(row$antibody_au[[1]]) else NA_character_
       mfi_val <- if(length(row$antibody_mfi) > 0 && !is.na(row$antibody_mfi[[1]])) as.character(row$antibody_mfi[[1]]) else NA_character_
+      well_val <- if("well" %in% names(row) && length(row$well) > 0 && !is.na(row$well[[1]])) as.character(row$well[[1]]) else NA_character_
       analyte_val <- row$analyte_acc[[1]]
 
       subject_acc_val  <- biosample_to_subject[[ biosample_acc ]]
@@ -235,7 +236,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
         analyte_val, analyte_val,
         assay_group_id, assay_id_val,
         "AU", conc_val,
-        mfi_val, mfi_val
+        mfi_val, well_val
       ))
 
       suppressWarnings(DBI::dbExecute(conn, paste0("RELEASE SAVEPOINT ", sp_name)))
