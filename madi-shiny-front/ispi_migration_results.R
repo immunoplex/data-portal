@@ -78,7 +78,8 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
                                        expsample_map, biosample_map,
                                        result_schema = "MBAA", commit = FALSE,
                                        source_conn = NULL, skip_if_exists = FALSE,
-                                       agroup_mapping = NULL) {
+                                       agroup_mapping = NULL,
+                                       source_exp_accession = NULL) {
 
   cat("[INFO] Processing MBAA/Luminex Results (Specific Logic)...\n")
 
@@ -114,8 +115,14 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       dilution, plate_id, antibody_mfi, antibody_au,
       nominal_sample_dilution, agroup, well
     FROM ", source_schema, ".xmap_sample
-    WHERE study_accession = $1
-  ")
+    WHERE study_accession = $1",
+    if(!is.null(source_exp_accession) && source_exp_accession != "") {
+      paste0(" AND experiment_accession = '", source_exp_accession, "'")
+    } else {
+      cat("  [WARN] No source_exp_accession provided — fetching ALL experiments for study. This may cause cross-experiment data pollution.\n")
+      ""
+    }
+  )
   
   # Fetch from SOURCE DB
   results_data <- tryCatch(

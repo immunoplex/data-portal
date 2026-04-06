@@ -1449,7 +1449,8 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
           config$result_schema, commit,
           source_conn = fetch_conn,
           skip_if_exists = skip_existing,
-          agroup_mapping = config$agroup_mapping
+          agroup_mapping = config$agroup_mapping,
+          source_exp_accession = source_exp_name_detected
         )
         if(!is.null(results$luminex_results$preview)) {
           results$preview_data <- results$luminex_results$preview
