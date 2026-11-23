@@ -94,10 +94,15 @@ output$migration_ui <- renderUI({
                        "Subjects" = "xmap_subjects", 
                        "Controls" = "xmap_control",
                        "Standards" = "xmap_standard",
-                       "Planned Visits" = "xmap_planned_visit",
-                       "Standard Fits" = "xmap_standard_fits"
+                       "Planned Visits" = "xmap_planned_visit"
                      ),
                      selected = "xmap_sample"),
+
+          # I-SPI fits curves with two methods; the portal tables hold one fit
+          # per curve, so the migration takes the fits of the method chosen here.
+          selectInput("ispi_fit_method", "I-SPI Fit Method:",
+                     choices = list("Frequentist" = "frequentist", "Bayesian" = "bayesian"),
+                     selected = "frequentist"),
           
           # Optional row limit (default: load ALL rows for full experiment scope)
           checkboxInput("limit_rows", "Limit number of rows (for preview only)", value = FALSE),
@@ -385,8 +390,25 @@ output$migration_ui <- renderUI({
 migration_values <- reactiveValues(
   source_connected = FALSE,
   connection_message = "Not connected",
-  preview_data = NULL
+  preview_data = NULL,
+  validated_project_id = NULL  # the project the access key was checked for
 )
+
+# Tables the preview may read (the input value is never put in SQL unchecked)
+ISPI_PREVIEW_TABLES <- c("xmap_sample", "xmap_subjects", "xmap_control",
+                         "xmap_standard", "xmap_planned_visit")
+
+# A new project ID invalidates an earlier access check
+observeEvent(input$ispi_project_id, {
+  if (!is.null(migration_values$validated_project_id) &&
+      !identical(as.integer(input$ispi_project_id), migration_values$validated_project_id)) {
+    migration_values$source_connected <- FALSE
+    migration_values$access_validated <- FALSE
+    migration_values$validated_project_id <- NULL
+    migration_values$connection_message <- "Project changed: validate the access key again."
+    shinyjs::disable("load_data_preview")
+  }
+}, ignoreInit = TRUE)
 
 # Reactive value for migration log download
 migration_log_text <- reactiveVal(NULL)
@@ -1266,6 +1288,10 @@ output$patient_mapping_ui <- renderUI({
 })
 
 # Helper: Create source DB connection from environment variables
+# Schema the portal reads I-SPI data from: ispi_export, the read-only interface
+# I-SPI provides for other systems (i-spi-deployment db/40_ispi_export.sql)
+ispi_source_schema <- function() Sys.getenv("ISPI_SOURCE_SCHEMA", "ispi_export")
+
 get_source_conn <- function() {
   DBI::dbConnect(
     RPostgres::Postgres(),
@@ -1287,16 +1313,17 @@ observeEvent(input$validate_access, {
     conn_auth <- get_source_conn()
     on.exit(DBI::dbDisconnect(conn_auth))
     
-    # Check access key against project_access_keys table
+    # Check the access key with ispi_export.check_access_key(); the key table
+    # itself is not readable by the portal's database role
     result <- DBI::dbGetQuery(conn_auth,
-      "SELECT project_id FROM madi_lumi_users.project_access_keys 
-       WHERE project_id = $1 AND access_key = $2::uuid",
-      params = list(as.integer(input$ispi_project_id), input$ispi_access_key)
+      paste0("SELECT ", ispi_source_schema(), ".check_access_key($1, $2) AS ok"),
+      params = list(as.integer(input$ispi_project_id), trimws(input$ispi_access_key))
     )
-    
-    if (nrow(result) > 0) {
+
+    if (isTRUE(result$ok[1])) {
       migration_values$source_connected <- TRUE
       migration_values$access_validated <- TRUE
+      migration_values$validated_project_id <- as.integer(input$ispi_project_id)
       migration_values$connection_message <- paste("Access validated for workspace", input$ispi_project_id)
       
       # Enable data preview button
@@ -1306,6 +1333,7 @@ observeEvent(input$validate_access, {
     } else {
       migration_values$source_connected <- FALSE
       migration_values$access_validated <- FALSE
+      migration_values$validated_project_id <- NULL
       migration_values$connection_message <- "Invalid access key for this project. Contact your administrator."
       shinyjs::disable("load_data_preview")
       showNotification("Invalid access key. Please check your credentials.", type = "error", duration = 10)
@@ -1314,6 +1342,7 @@ observeEvent(input$validate_access, {
   }, error = function(e) {
     migration_values$source_connected <- FALSE
     migration_values$access_validated <- FALSE
+    migration_values$validated_project_id <- NULL
     migration_values$connection_message <- paste("Authentication failed:", e$message)
     shinyjs::disable("load_data_preview")
     showNotification(paste("Authentication failed:", e$message), type = "error", duration = 10)
@@ -1338,7 +1367,8 @@ output$access_status_display <- renderUI({
 
 # Load data preview
 observeEvent(input$load_data_preview, {
-  req(migration_values$source_connected, input$preview_table)
+  req(migration_values$source_connected, input$preview_table,
+      migration_values$validated_project_id, input$preview_table %in% ISPI_PREVIEW_TABLES)
   
   showNotification("Loading data preview...", type = "message", duration = 3)
   
@@ -1357,28 +1387,29 @@ observeEvent(input$load_data_preview, {
         "visit.type as biosample_type, ",
         "visit.planned_visit_accession, ",
         "timing.actual_visit_day ",
-        "FROM ", Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"), ".xmap_sample xs ",
-        "LEFT JOIN ", Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"), ".xmap_subjects subj ",
+        "FROM ", ispi_source_schema(), ".xmap_sample xs ",
+        "LEFT JOIN ", ispi_source_schema(), ".xmap_subjects subj ",
         "  ON xs.patientid = subj.xmap_patientid AND xs.study_accession = subj.study_accession ",
-        "LEFT JOIN ", Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"), ".xmap_planned_visit visit ",
+        "LEFT JOIN ", ispi_source_schema(), ".xmap_planned_visit visit ",
         "  ON xs.timeperiod = visit.timepoint_name AND xs.study_accession = visit.study_accession ",
-        "LEFT JOIN ", Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"), ".xmap_sample_timing timing ",
+        "LEFT JOIN ", ispi_source_schema(), ".xmap_sample_timing timing ",
         "  ON xs.patientid = timing.patientid AND xs.timeperiod = timing.timeperiod"
       )
     } else {
-      base_query <- paste0("SELECT * FROM ", Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"), ".", input$preview_table)
+      base_query <- paste0("SELECT * FROM ", ispi_source_schema(), ".", input$preview_table)
     }
     
-    where_conditions <- c()
-    params <- list()
-    
-    
+    # Only the validated project
+    where_conditions <- if (input$preview_table == "xmap_sample") "xs.project_id = $1" else "project_id = $1"
+    params <- list(migration_values$validated_project_id)
+
     if (!is.null(input$study_accession_filter) && input$study_accession_filter != "") {
+      param_num <- length(params) + 1
       # Qualify column with xs. prefix for joined query to avoid ambiguity
       if (input$preview_table == "xmap_sample") {
-        where_conditions <- c(where_conditions, "xs.study_accession = $1")
+        where_conditions <- c(where_conditions, paste0("xs.study_accession = $", param_num))
       } else {
-        where_conditions <- c(where_conditions, "study_accession = $1")
+        where_conditions <- c(where_conditions, paste0("study_accession = $", param_num))
       }
       params <- c(params, list(input$study_accession_filter))
     }
@@ -1400,7 +1431,7 @@ observeEvent(input$load_data_preview, {
     
     # Only apply row limit if checkbox is checked (default: load all rows)
     if(isTRUE(input$limit_rows) && !is.null(input$preview_limit)) {
-      query <- paste(base_query, "LIMIT", input$preview_limit)
+      query <- paste(base_query, "LIMIT", as.integer(input$preview_limit))
     } else {
       query <- base_query
     }
@@ -1546,14 +1577,15 @@ output$download_mapping_template <- downloadHandler(
       
       # 1. Try to pre-fill from I-SPI xmap_subjects (source DB mapping)
       tryCatch({
-        source_schema <- Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results")
+        source_schema <- ispi_source_schema()
         conn_source <- get_source_conn()
         on.exit(DBI::dbDisconnect(conn_source), add = TRUE)
         
         ispi_mappings <- DBI::dbGetQuery(conn_source,
           paste0("SELECT DISTINCT xmap_patientid, subject_accession 
                   FROM ", source_schema, ".xmap_subjects 
-                  WHERE subject_accession IS NOT NULL AND subject_accession != ''")
+                  WHERE project_id = $1 AND subject_accession IS NOT NULL AND subject_accession != ''"),
+          params = list(migration_values$validated_project_id)
         )
         
         if(nrow(ispi_mappings) > 0) {
@@ -1860,7 +1892,7 @@ observeEvent(input$save_to_target, {
     t0_event = input$biosample_t0_event %||% "Time of enrollment",
     timeperiod_mapping = timeperiod_mapping,
     agroup_mapping = agroup_mapping,
-    ispi_project_id = input$ispi_project_id,
+    ispi_project_id = migration_values$validated_project_id,
     mapping_override = migration_values$mapping_override
   )
   
@@ -2089,11 +2121,12 @@ observeEvent(input$execute_test_migration, {
     default_species = input$default_species,
     result_schema_type = input$result_schema_type %||% "MBAA",
     result_schema = input$result_schema_type %||% "MBAA", # redundant alias for queries
-    source_schema = Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"),
+    source_schema = ispi_source_schema(),
     source_study = input$study_accession_filter,
     timeperiod_mapping = timeperiod_mapping,
     agroup_mapping = agroup_mapping,
-    ispi_project_id = input$ispi_project_id
+    ispi_project_id = migration_values$validated_project_id,
+    fit_method = input$ispi_fit_method %||% "frequentist"
   )
   
 
@@ -2670,11 +2703,12 @@ observeEvent(input$execute_live_confirmed, {
     default_species = input$default_species,
     result_schema_type = input$result_schema_type %||% "MBAA",
     result_schema = input$result_schema_type %||% "MBAA",
-    source_schema = Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results"),
+    source_schema = ispi_source_schema(),
     source_study = input$study_accession_filter,
     timeperiod_mapping = timeperiod_mapping,
     agroup_mapping = agroup_mapping,
-    ispi_project_id = input$ispi_project_id,
+    ispi_project_id = migration_values$validated_project_id,
+    fit_method = input$ispi_fit_method %||% "frequentist",
     operator_name = operator_name,
     operator_designation = operator_designation,
     rerun_mode = migration_values$rerun_mode %||% "first_run"
@@ -2971,8 +3005,8 @@ observeEvent(input$start_migration_wizard, {
 # Populate Source Study List when access is validated
 observeEvent(migration_values$access_validated, {
     req(isTRUE(migration_values$access_validated))
-    source_schema <- Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results")
-    project_id <- input$ispi_project_id
+    source_schema <- ispi_source_schema()
+    project_id <- migration_values$validated_project_id
     tryCatch({
        conn_source <- get_source_conn()
        on.exit(DBI::dbDisconnect(conn_source))
@@ -2994,8 +3028,8 @@ observeEvent(migration_values$access_validated, {
 # Populate Experiment list when study changes
 observeEvent(input$study_accession_filter, {
     req(input$study_accession_filter, isTRUE(migration_values$access_validated))
-    source_schema <- Sys.getenv("ISPI_SOURCE_SCHEMA", "madi_results")
-    project_id <- input$ispi_project_id
+    source_schema <- ispi_source_schema()
+    project_id <- migration_values$validated_project_id
     tryCatch({
        conn_source <- get_source_conn()
        on.exit(DBI::dbDisconnect(conn_source))
