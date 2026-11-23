@@ -78,6 +78,7 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
                                        expsample_map, biosample_map,
                                        result_schema = "MBAA", commit = FALSE,
                                        source_conn = NULL, skip_if_exists = FALSE,
+                                       source_project_id = NULL,
                                        agroup_mapping = NULL,
                                        source_exp_accession = NULL) {
 
@@ -116,8 +117,9 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
       nominal_sample_dilution, agroup, well
     FROM ", source_schema, ".xmap_sample
     WHERE study_accession = $1",
+    if(!is.null(source_project_id)) " AND project_id = $2" else "",
     if(!is.null(source_exp_accession) && source_exp_accession != "") {
-      paste0(" AND experiment_accession = '", source_exp_accession, "'")
+      paste0(" AND experiment_accession = $", if(!is.null(source_project_id)) 3 else 2)
     } else {
       cat("  [WARN] No source_exp_accession provided — fetching ALL experiments for study. This may cause cross-experiment data pollution.\n")
       ""
@@ -126,7 +128,11 @@ insert_mbaa_results_luminex <- function(conn, source_schema, study_acc_source,
   
   # Fetch from SOURCE DB
   results_data <- tryCatch(
-    DBI::dbGetQuery(fetch_conn, query, params = list(study_acc_source)),
+    DBI::dbGetQuery(fetch_conn, query, params = c(
+      list(study_acc_source),
+      if(!is.null(source_project_id)) list(as.integer(source_project_id)),
+      if(!is.null(source_exp_accession) && source_exp_accession != "") list(source_exp_accession)
+    )),
     error = function(e) {
       cat("  [ERROR] Result fetch failed:", e$message, "\n")
       return(data.frame())

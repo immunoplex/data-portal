@@ -100,7 +100,7 @@ validate_or_create_experiment <- function(conn, experiment_accession, study_acce
 # =====================================================
 # UTILITY: Get List of Source Studies (filtered by project_id)
 # =====================================================
-get_source_studies_list <- function(conn, schema = "madi_results", project_id = NULL) {
+get_source_studies_list <- function(conn, schema = "ispi_export", project_id = NULL) {
   tryCatch({
     if(!is.null(project_id)) {
       # Filter studies by project_id from xmap_header
@@ -122,7 +122,7 @@ get_source_studies_list <- function(conn, schema = "madi_results", project_id = 
 # =====================================================
 # UTILITY: Get List of Source Experiments (filtered by project_id + study)
 # =====================================================
-get_source_experiments_list <- function(conn, schema = "madi_results", project_id = NULL, study_accession = NULL) {
+get_source_experiments_list <- function(conn, schema = "ispi_export", project_id = NULL, study_accession = NULL) {
   tryCatch({
     conditions <- c()
     params <- list()
@@ -1323,7 +1323,18 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
       }
       
       # 1. Fetch Data from SOURCE DB
-      source_schema <- config$source_schema %||% "madi_results"
+      source_schema <- config$source_schema %||% "ispi_export"
+      # Fits of one method per migration: the portal tables hold one fit per curve
+      fit_method <- config$fit_method %||% "frequentist"
+      if(!fit_method %in% c("frequentist", "bayesian")) stop("Unknown I-SPI fit method: ", fit_method)
+      ispi_project_id <- config$ispi_project_id
+      if(is.null(ispi_project_id) || is.na(ispi_project_id)) {
+        # Source reads are limited to the validated project; with none, they return nothing
+        cat("  [WARN] No validated I-SPI project - no I-SPI controls, standards, curves or QC data are fetched
+")
+        ispi_project_id <- NA_integer_
+      }
+      ispi_project_id <- as.integer(ispi_project_id)
       
       # Use source_study logic:
       # If source_study is provided in config, use it for FETCHING.
@@ -1333,77 +1344,83 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
       
       cat(paste0("[INFO] Fetching auxiliary data from ", source_schema, " for Study '", study_acc_source, "'...\n"))
       
+      # Source study scoped to the validated project; values go as parameters
+      src_params <- list(ispi_project_id, study_acc_source)
+
       # xmap_control (FETCH from source)
-      ctrl_q <- paste0("SELECT * FROM ", source_schema, ".xmap_control WHERE study_accession = '", study_acc_source, "'")
-      ctrl_data <- tryCatch(DBI::dbGetQuery(fetch_conn, ctrl_q), error=function(e){ cat("  Warning: xmap_control fetch failed:", e$message, "\n"); data.frame() })
-      
+      ctrl_q <- paste0("SELECT * FROM ", source_schema, ".xmap_control WHERE project_id = $1 AND study_accession = $2")
+      ctrl_data <- tryCatch(DBI::dbGetQuery(fetch_conn, ctrl_q, params = src_params), error=function(e){ cat("  Warning: xmap_control fetch failed:", e$message, "\n"); data.frame() })
+
       # xmap_buffer (FETCH from source)
-      buff_q <- paste0("SELECT * FROM ", source_schema, ".xmap_buffer WHERE study_accession = '", study_acc_source, "'")
-      buff_data <- tryCatch(DBI::dbGetQuery(fetch_conn, buff_q), error=function(e){ cat("  Warning: xmap_buffer fetch failed:", e$message, "\n"); data.frame() })
+      buff_q <- paste0("SELECT * FROM ", source_schema, ".xmap_buffer WHERE project_id = $1 AND study_accession = $2")
+      buff_data <- tryCatch(DBI::dbGetQuery(fetch_conn, buff_q, params = src_params), error=function(e){ cat("  Warning: xmap_buffer fetch failed:", e$message, "\n"); data.frame() })
 
       # xmap_standard (FETCH from source)
-      std_q <- paste0("SELECT * FROM ", source_schema, ".xmap_standard WHERE study_accession = '", study_acc_source, "'")
-      std_data <- tryCatch(DBI::dbGetQuery(fetch_conn, std_q), error=function(e){ cat("  Warning: xmap_standard fetch failed:", e$message, "\n"); data.frame() })
+      std_q <- paste0("SELECT * FROM ", source_schema, ".xmap_standard WHERE project_id = $1 AND study_accession = $2")
+      std_data <- tryCatch(DBI::dbGetQuery(fetch_conn, std_q, params = src_params), error=function(e){ cat("  Warning: xmap_standard fetch failed:", e$message, "\n"); data.frame() })
 
 
       
-      # best_glance_all (FETCH from source) for Standard Curves
+      # Standard curves, model QC and sample QC come from the current I-SPI fits
+      # (ispi_export.standard_curve / model_qc / sample_qc), best model per curve,
+      # for the fit method chosen on the migration screen.
       # Source Experiment Name comes from source_data (e.g. IgG1) NOT config (EXPxxxx)
       source_exp_name_detected <- if(!is.null(source_data$experiment_accession)) unique(source_data$experiment_accession)[[1]] else config$experiment_accession
-      
-      sc_q <- paste0("SELECT * FROM ", source_schema, ".best_glance_all WHERE study_accession = '", study_acc_source, "' AND experiment_accession = '", source_exp_name_detected, "'")
-      
-      cat(paste0("  [INFO] Fetching Standard Curves Query: ", sc_q, "\n"))
+      exp_params <- list(ispi_project_id, study_acc_source, source_exp_name_detected, fit_method)
+
       cat(paste0("  [INFO] Detected Source Exp Name: '", source_exp_name_detected, "' (from source data)\n"))
       cat(paste0("  [INFO] Config Exp Acc (Target): '", config$experiment_accession, "'\n"))
-      
-      # Debug: Check available experiments in source for this study
-      try({
-        avail_exps <- DBI::dbGetQuery(fetch_conn, paste0("SELECT DISTINCT experiment_accession FROM ", source_schema, ".best_glance_all WHERE study_accession = '", study_acc_source, "'"))
-        cat(paste0("  [INFO] Available Experiments in best_glance_all: ", paste(avail_exps$experiment_accession, collapse=", "), "\n"))
-      }, silent=TRUE)
+      cat(paste0("  [INFO] I-SPI fit method: ", fit_method, "\n"))
 
-      sc_data <- tryCatch(DBI::dbGetQuery(fetch_conn, sc_q), error=function(e){ cat("  Warning: best_glance_all fetch failed:", e$message, "\n"); data.frame() })
-      
+      sc_q <- paste0("SELECT * FROM ", source_schema, ".standard_curve
+                      WHERE project_id = $1 AND study_accession = $2 AND experiment_accession = $3 AND method = $4
+                      ORDER BY plate, antigen, nominal_sample_dilution")
+      sc_data <- tryCatch(DBI::dbGetQuery(fetch_conn, sc_q, params = exp_params),
+                          error=function(e){ cat("  Warning: standard_curve fetch failed:", e$message, "\n"); data.frame() })
+
+      # Curves fitted only with the other method are not migrated: count them for the log
+      try({
+        other <- DBI::dbGetQuery(fetch_conn, paste0(
+          "SELECT count(DISTINCT curve_id) AS n FROM ", source_schema, ".model_qc o
+           WHERE o.workspace_id = $1 AND o.study_name = $2 AND o.experiment_name = $3 AND o.method <> $4
+             AND NOT EXISTS (SELECT 1 FROM ", source_schema, ".model_qc m
+                             WHERE m.curve_id = o.curve_id AND m.method = $4)"), params = exp_params)
+        if(isTRUE(other$n[1] > 0)) {
+          cat(paste0("  [WARN] ", other$n[1], " curve(s) have no ", fit_method,
+                     " fit (only the other method) and are not migrated\n"))
+        }
+      }, silent = TRUE)
+
       if(nrow(sc_data) == 0) {
-        cat("  [WARN] WARNING: No standard curves found for source experiment '", source_exp_name_detected, "'!\n")
+        cat("  [WARN] WARNING: No ", fit_method, " standard curves found for source experiment '", source_exp_name_detected, "'!\n")
       }
-      
-      # Fetch QC data from source using stored functions (if project_id is provided)
-      sample_qc_data <- data.frame()
-      model_qc_data <- data.frame()
-      ispi_project_id <- config$ispi_project_id
-      
-      if(!is.null(ispi_project_id) && !is.na(ispi_project_id)) {
-        cat(paste0("  [INFO] Fetching QC data from source (project_id: ", ispi_project_id, ")...\n"))
-        
-        # Fetch sample QC data
-        sample_qc_data <- tryCatch({
-          DBI::dbGetQuery(fetch_conn, paste0(
-            "SELECT * FROM madi_results.get_sample_qc_data('", 
-            study_acc_source, "', '", source_exp_name_detected, "', ", ispi_project_id, ")"
-          ))
-        }, error = function(e) { 
-          cat("  [WARN] get_sample_qc_data fetch failed:", e$message, "\n")
-          data.frame() 
-        })
-        
-        # Fetch model QC data
-        model_qc_data <- tryCatch({
-          DBI::dbGetQuery(fetch_conn, paste0(
-            "SELECT * FROM madi_results.get_model_qc_data('", 
-            study_acc_source, "', '", source_exp_name_detected, "', ", ispi_project_id, ")"
-          ))
-        }, error = function(e) { 
-          cat("  [WARN] get_model_qc_data fetch failed:", e$message, "\n")
-          data.frame() 
-        })
-        
-        cat(paste0("  [INFO] Fetched QC data: ", nrow(sample_qc_data), " sample QC rows, ", 
-                   nrow(model_qc_data), " model QC rows\n"))
-      } else {
-        cat("  [INFO] No I-SPI project ID provided - skipping QC data fetch\n")
-      }
+
+      cat(paste0("  [INFO] Fetching QC data from source (project_id: ", ispi_project_id, ")...\n"))
+
+      # Sample QC: one row per sample well and curve
+      sample_qc_data <- tryCatch({
+        DBI::dbGetQuery(fetch_conn, paste0(
+          "SELECT * FROM ", source_schema, ".sample_qc
+           WHERE workspace_id = $1 AND study_name = $2 AND experiment_name = $3 AND method = $4
+           ORDER BY plate_number, plate_well, reagent_name"), params = exp_params)
+      }, error = function(e) {
+        cat("  [WARN] sample_qc fetch failed:", e$message, "\n")
+        data.frame()
+      })
+
+      # Model QC: one row per curve
+      model_qc_data <- tryCatch({
+        DBI::dbGetQuery(fetch_conn, paste0(
+          "SELECT * FROM ", source_schema, ".model_qc
+           WHERE workspace_id = $1 AND study_name = $2 AND experiment_name = $3 AND method = $4
+           ORDER BY plate_number, reagent_name, nominal_sample_dilution"), params = exp_params)
+      }, error = function(e) {
+        cat("  [WARN] model_qc fetch failed:", e$message, "\n")
+        data.frame()
+      })
+
+      cat(paste0("  [INFO] Fetched QC data: ", nrow(sample_qc_data), " sample QC rows, ",
+                 nrow(model_qc_data), " model QC rows\n"))
       
       cat(paste0("  [INFO] Fetched: ", nrow(ctrl_data), " controls, ", nrow(buff_data), " buffers, ", 
                  nrow(std_data), " standards, ", nrow(sc_data), " standard curves\n"))
@@ -1454,7 +1471,8 @@ execute_migration <- function(conn, source_data, config, commit = FALSE, source_
           source_conn = fetch_conn,
           skip_if_exists = skip_existing,
           agroup_mapping = config$agroup_mapping,
-          source_exp_accession = source_exp_name_detected
+          source_exp_accession = source_exp_name_detected,
+          source_project_id = ispi_project_id
         )
         if(!is.null(results$luminex_results$preview)) {
           results$preview_data <- results$luminex_results$preview
@@ -2139,7 +2157,7 @@ generate_dq_audit_report <- function(conn, experiment_accession) {
     if(isTRUE(sqc_count == 0L) && isTRUE(es_count > 0L)) {
       add("  🔴 CRITICAL: Sample QC Data is empty (0 rows)")
       add("     Cause: patient_lookup may have failed — check if patientid+well composite key matches QC source subject_id+plate_well.")
-      add("     Action: Verify get_sample_qc_data returns rows for this experiment in I-SPI source.")
+      add("     Action: Verify ispi_export.sample_qc returns rows for this experiment and fit method in I-SPI.")
       criticals_count <- criticals_count + 1
     } else if(isTRUE(sqc_count > 0L)) {
       # Expected: at least 1 QC row per expsample
