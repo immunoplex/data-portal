@@ -336,7 +336,7 @@ insert_control_results <- function(conn, control_data, buffer_data, standard_dat
 # -----------------------------------------------------
 # 10. INSERT STANDARD CURVES
 # -----------------------------------------------------
-# Migrates standard curve data from I-SPI (ispi_export.standard_curve) to standard_curve
+# Migrates standard curve data from best_glance_all to standard_curve
 insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession,
                                    experiment_accession, result_schema = "MBAA", commit = FALSE, skip_if_exists = FALSE) {
 
@@ -363,8 +363,8 @@ insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession
   sc_accession_map <- list()  # Maps antigen|experiment|plate -> SC accession
   
   # 1. Ensure all analytes exist in lk_analyte (FK constraint fk_standard_curve_4)
-  # NOTE: the feature (IgG1, ADCD, etc.) is taken from the source
-  # 'experiment_accession' column, as with the retired best_glance_all.
+  # NOTE: best_glance_all has NO 'feature' column. The feature (IgG1, ADCD, etc.)
+  # is stored in the 'experiment_accession' column of the source table.
   if("antigen" %in% names(fit_data) && "experiment_accession" %in% names(fit_data)) {
     sc_analytes <- unique(paste0(as.character(fit_data$antigen), "|", as.character(fit_data$experiment_accession)))
     cat(paste0("[INFO] Checking/Creating ", length(sc_analytes), " analytes for standard curves...\n"))
@@ -407,7 +407,7 @@ insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession
       
       # Construct mappings
       antigen <- if(!is.null(row$antigen) && !is.na(row$antigen)) as.character(row$antigen)[1] else ""
-      # Feature comes from the source experiment_accession (e.g. IgG1, ADCD)
+      # Feature comes from experiment_accession in best_glance_all (e.g. IgG1, ADCD)
       feature <- if(!is.null(row$experiment_accession) && !is.na(row$experiment_accession)) as.character(row$experiment_accession)[1] else ""
       analyte_str <- if(nchar(feature) > 0) paste0(antigen, "|", feature) else antigen
       
@@ -477,7 +477,7 @@ insert_standard_curves <- function(conn, fit_data, workspace_id, study_accession
 }
 
 # =============================================================================
-# Insert Sample QC Data (from ispi_export.sample_qc)
+# Insert Sample QC Data (from get_sample_qc_data function)
 # Links each row to an expsample_accession via plate+well+experiment+patientid
 # =============================================================================
 insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_id,
@@ -614,7 +614,7 @@ insert_sample_qc_data <- function(conn, sample_qc_df, sample_mapping, workspace_
 
 
 # =============================================================================
-# Insert Model QC Data (from ispi_export.model_qc)
+# Insert Model QC Data (from get_model_qc_data function)
 # Links each row to a standard_curve_accession via plate+antigen+experiment
 # =============================================================================
 insert_model_qc_data <- function(conn, model_qc_df, sc_accession_map, workspace_id,
